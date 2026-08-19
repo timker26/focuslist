@@ -98,12 +98,6 @@ const config: ExpoConfig = {
   plugins: [
     "expo-router",
     [
-      "expo-web-browser",
-      {
-        experimentalLauncherActivity: true,
-      },
-    ],
-    [
       "expo-image-picker",
       {
         photosPermission:
