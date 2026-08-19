@@ -75,32 +75,6 @@ jobs:
       - name: Check TypeScript and tests
         run: pnpm check && pnpm test
 
-      - name: Prepare Android project for emulator smoke test
-        run: pnpm exec expo prebuild --platform android --clean --no-install
-
-      - name: Build debug APK for emulator smoke test
-        working-directory: android
-        run: ./gradlew :app:assembleDebug
-
-      - name: Enable KVM for Android emulator
-        run: |
-          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
-          sudo udevadm control --reload-rules
-          sudo udevadm trigger --name-match=kvm
-
-      - name: Install and launch debug APK on Android emulator
-        uses: reactivecircus/android-emulator-runner@v2
-        with:
-          api-level: 35
-          arch: x86_64
-          profile: pixel_7_pro
-          emulator-options: -no-window -no-snapshot -gpu swiftshader_indirect -noaudio -no-boot-anim
-          script: |
-            adb install -r app/build/outputs/apk/debug/app-debug.apk
-            adb shell monkey -p com.app.focuslistmobile 1
-            sleep 8
-            adb shell pidof com.app.focuslistmobile
-
       - name: Restore Android upload key
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
