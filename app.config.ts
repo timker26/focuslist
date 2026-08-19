@@ -66,6 +66,12 @@ const config: ExpoConfig = {
     package: env.androidPackage,
     versionCode: Number(process.env.ANDROID_VERSION_CODE ?? "1"),
     permissions: ["POST_NOTIFICATIONS"],
+    blockedPermissions: [
+      "android.permission.RECORD_AUDIO",
+      "android.permission.READ_EXTERNAL_STORAGE",
+      "android.permission.WRITE_EXTERNAL_STORAGE",
+      "android.permission.SYSTEM_ALERT_WINDOW",
+    ],
     intentFilters: [
       {
         action: "VIEW",
@@ -105,20 +111,6 @@ const config: ExpoConfig = {
       {
         color: "#4659E8",
         defaultChannel: "task-reminders",
-      },
-    ],
-    [
-      "expo-audio",
-      {
-        microphonePermission:
-          "Allow $(PRODUCT_NAME) to access your microphone.",
-      },
-    ],
-    [
-      "expo-video",
-      {
-        supportsBackgroundPlayback: true,
-        supportsPictureInPicture: true,
       },
     ],
     [
