@@ -1,5 +1,8 @@
 import * as Linking from "expo-linking";
 import * as ReactNative from "react-native";
+import * as WebBrowser from "expo-web-browser";
+
+const FOCUSLIST_API_BASE_URL = "https://3000-itcuur5jhhjxbmuxsx593-436cab69.us4.manus.computer";
 
 // Extract scheme from bundle ID (last segment timestamp, prefixed with "manus")
 // e.g., "space.manus.my.app.t20240115103045" -> "manus20240115103045"
@@ -45,8 +48,8 @@ export function getApiBaseUrl(): string {
     }
   }
 
-  // Fallback to empty (will use relative URL)
-  return "";
+  // Native APKs need a stable, absolute production endpoint.
+  return FOCUSLIST_API_BASE_URL;
 }
 
 export const SESSION_TOKEN_KEY = "app_session_token";
@@ -102,9 +105,8 @@ export const getLoginUrl = () => {
  * @returns Always null, the callback is handled via deep link.
  */
 export async function startOAuthLogin(): Promise<string | null> {
-  const loginUrl = getLoginUrl();
-
   if (ReactNative.Platform.OS === "web") {
+    const loginUrl = getLoginUrl();
     // On web, just redirect
     if (typeof window !== "undefined") {
       window.location.href = loginUrl;
@@ -112,18 +114,17 @@ export async function startOAuthLogin(): Promise<string | null> {
     return null;
   }
 
-  const supported = await Linking.canOpenURL(loginUrl);
-  if (!supported) {
-    console.warn("[OAuth] Cannot open login URL: URL scheme not supported");
-    // 可考虑抛出错误或返回错误状态，让调用方处理
-    return null;
-  }
-
   try {
-    await Linking.openURL(loginUrl);
+    const redirectUri = getRedirectUri();
+    const loginUrl = new URL("/api/oauth/mobile-login", getApiBaseUrl());
+    loginUrl.searchParams.set("redirectUri", redirectUri);
+    const result = await WebBrowser.openAuthSessionAsync(loginUrl.toString(), redirectUri);
+    if (result.type === "success") return result.url;
+    if (result.type === "cancel" || result.type === "dismiss") return null;
+    throw new Error("Не удалось открыть окно входа.");
   } catch (error) {
     console.error("[OAuth] Failed to open login URL:", error);
-    // 可考虑抛出错误让调用方处理
+    throw error;
   }
 
   // The OAuth callback will reopen the app via deep link.
