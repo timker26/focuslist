@@ -1,0 +1,25 @@
+{
+  "id": "/focuslist",
+  "name": "FocusList — список дел",
+  "short_name": "FocusList",
+  "description": "Задачи, папки, сроки и напоминания в спокойном ритме.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "theme_color": "#111522",
+  "background_color": "#111522",
+  "icons": [
+    {
+      "src": "/pwa-icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/pwa-icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

@@ -1,0 +1,239 @@
+name: Android App Bundle
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git ref для сборки (ветка, тег или SHA); по умолчанию — выбранная GitHub ветка"
+        required: false
+        type: string
+      upload_to_play:
+        description: "Отправить AAB во внутренний трек Google Play"
+        required: true
+        default: false
+        type: boolean
+      publish_to_production:
+        description: "После отдельного подтверждения отправить AAB в production Google Play"
+        required: true
+        default: false
+        type: boolean
+      production_confirmation:
+        description: "Для production введите PUBLISH_FOCUSLIST_PRODUCTION"
+        required: false
+        type: string
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-aab-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build signed Android App Bundle
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      ANDROID_VERSION_CODE: ${{ github.run_number }}
+      FOCUSLIST_RELEASE_STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      FOCUSLIST_RELEASE_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+      FOCUSLIST_RELEASE_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.event.release.tag_name || github.ref }}
+
+      - name: Set up Node.js and pnpm
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Enable pnpm
+        run: corepack enable && corepack prepare pnpm@9.12.0 --activate
+
+      - name: Read application version
+        id: release_version
+        run: echo "tag=v$(node scripts/get-app-version.mjs)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Check TypeScript and tests
+        run: pnpm check && pnpm test
+
+      - name: Prepare Android project for emulator smoke test
+        run: pnpm exec expo prebuild --platform android --clean --no-install
+
+      - name: Build debug APK for emulator smoke test
+        working-directory: android
+        run: ./gradlew :app:assembleDebug
+
+      - name: Enable KVM for Android emulator
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Install and launch debug APK on Android emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          arch: x86_64
+          profile: pixel_7_pro
+          emulator-options: -no-window -no-snapshot -gpu swiftshader_indirect -noaudio -no-boot-anim
+          script: |
+            adb install -r app/build/outputs/apk/debug/app-debug.apk
+            adb shell monkey -p com.app.focuslistmobile 1
+            sleep 8
+            adb shell pidof com.app.focuslistmobile
+
+      - name: Restore Android upload key
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          test -n "$ANDROID_KEYSTORE_BASE64"
+          test -n "$FOCUSLIST_RELEASE_STORE_PASSWORD"
+          test -n "$FOCUSLIST_RELEASE_KEY_ALIAS"
+          test -n "$FOCUSLIST_RELEASE_KEY_PASSWORD"
+          pnpm exec expo prebuild --platform android --clean --no-install
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > android/app/focuslist-upload-key.jks
+          printf '\nFOCUSLIST_RELEASE_STORE_FILE=focuslist-upload-key.jks\n' >> android/gradle.properties
+
+      - name: Configure release signing
+        run: node scripts/configure-android-release-signing.mjs
+
+      - name: Build signed App Bundle
+        working-directory: android
+        run: ./gradlew :app:bundleRelease :app:assembleRelease
+
+      - name: Upload App Bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: focuslist-android-aab-${{ github.run_number }}
+          path: android/app/build/outputs/bundle/release/app-release.aab
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload installable Android APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: focuslist-android-apk-${{ github.run_number }}
+          path: android/app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Create or reuse GitHub Release from application version
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release_version.outputs.tag }}
+        run: |
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" --target "$(git rev-parse HEAD)" --title "FocusList $RELEASE_TAG" --generate-notes
+          fi
+
+      - name: Attach App Bundle, APK and QR code to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || steps.release_version.outputs.tag }}
+          APK_URL: ${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.event.release.tag_name || steps.release_version.outputs.tag }}/app-release.apk
+        run: |
+          node scripts/generate_qr.mjs "$APK_URL" focuslist-apk-qr.png
+          gh release upload "$RELEASE_TAG" \
+            android/app/build/outputs/bundle/release/app-release.aab \
+            android/app/build/outputs/apk/release/app-release.apk \
+            focuslist-apk-qr.png \
+            --clobber
+
+      - name: Verify Google Play service account
+        if: github.event_name == 'release' || inputs.upload_to_play
+        env:
+          GOOGLE_PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
+        run: test -n "$GOOGLE_PLAY_SERVICE_ACCOUNT_JSON"
+
+      - name: Publish to Google Play internal testing
+        if: github.event_name == 'release' || inputs.upload_to_play
+        uses: r0adkll/upload-google-play@v1
+        with:
+          serviceAccountJsonPlainText: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
+          packageName: com.app.focuslistmobile
+          releaseFiles: android/app/build/outputs/bundle/release/app-release.aab
+          tracks: internal
+          status: completed
+          releaseName: ${{ github.event.release.tag_name || steps.release_version.outputs.tag }}
+          whatsNewDirectory: distribution/whatsnew
+
+  publish_production:
+    name: Publish approved production release
+    needs: build
+    if: github.event_name == 'workflow_dispatch' && inputs.publish_to_production && inputs.production_confirmation == 'PUBLISH_FOCUSLIST_PRODUCTION'
+    runs-on: ubuntu-latest
+    environment:
+      name: google-play-production
+      url: https://play.google.com/console
+    env:
+      GOOGLE_PLAY_PRODUCTION_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_PLAY_PRODUCTION_SERVICE_ACCOUNT_JSON }}
+    steps:
+      - name: Download signed App Bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: focuslist-android-aab-${{ github.run_number }}
+          path: release-artifact
+
+      - name: Verify production service account
+        run: test -n "$GOOGLE_PLAY_PRODUCTION_SERVICE_ACCOUNT_JSON"
+
+      - name: Publish approved App Bundle to Google Play production
+        uses: r0adkll/upload-google-play@v1
+        with:
+          serviceAccountJsonPlainText: ${{ secrets.GOOGLE_PLAY_PRODUCTION_SERVICE_ACCOUNT_JSON }}
+          packageName: com.app.focuslistmobile
+          releaseFiles: release-artifact/app-release.aab
+          tracks: production
+          status: completed
+          releaseName: ${{ format('Production build {0}', github.run_number) }}
+          whatsNewDirectory: distribution/whatsnew
+
+  notify:
+    name: Notify build result
+    needs: [build, publish_production]
+    if: always()
+    runs-on: ubuntu-latest
+    env:
+      DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+    steps:
+      - name: Write release summary
+        env:
+          RESULT: ${{ needs.build.result }}
+          PRODUCTION_RESULT: ${{ needs.publish_production.result || 'not requested' }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || 'manual build' }}
+        run: |
+          echo "## FocusList Android release" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Reference: \`$RELEASE_TAG\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Result: **$RESULT**" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Production: **$PRODUCTION_RESULT**" >> "$GITHUB_STEP_SUMMARY"
+          echo "- [Open workflow run]($RUN_URL)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Notify Discord webhook when configured
+        if: env.DISCORD_WEBHOOK_URL != ''
+        env:
+          RESULT: ${{ needs.build.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || 'manual build' }}
+        run: |
+          payload=$(jq -n --arg content "FocusList Android build: $RESULT ($RELEASE_TAG) — $RUN_URL" '{content: $content}')
+          curl --fail --silent --show-error -H "Content-Type: application/json" -d "$payload" "$DISCORD_WEBHOOK_URL"
