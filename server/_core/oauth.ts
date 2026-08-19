@@ -2,6 +2,7 @@ import { COOKIE_NAME, ONE_YEAR_MS } from "../../shared/const.js";
 import type { Express, Request, Response } from "express";
 import { getUserByOpenId, upsertUser } from "../db";
 import { getSessionCookieOptions } from "./cookies";
+import { ENV } from "./env";
 import { sdk } from "./sdk";
 
 function getQueryParam(req: Request, key: string): string | undefined {
@@ -62,6 +63,26 @@ function buildUserResponse(
 }
 
 export function registerOAuthRoutes(app: Express) {
+  app.get("/api/oauth/mobile-login", (req: Request, res: Response) => {
+    const redirectUri = getQueryParam(req, "redirectUri");
+    if (!redirectUri || !/^manus[a-z0-9]+:\/\//i.test(redirectUri)) {
+      res.status(400).json({ error: "A valid FocusList redirect URI is required" });
+      return;
+    }
+
+    if (!ENV.appId || !ENV.oAuthPortalUrl) {
+      res.status(503).json({ error: "OAuth is not configured" });
+      return;
+    }
+
+    const loginUrl = new URL("/app-auth", ENV.oAuthPortalUrl);
+    loginUrl.searchParams.set("appId", ENV.appId);
+    loginUrl.searchParams.set("redirectUri", redirectUri);
+    loginUrl.searchParams.set("state", Buffer.from(redirectUri, "utf8").toString("base64"));
+    loginUrl.searchParams.set("type", "signIn");
+    res.redirect(302, loginUrl.toString());
+  });
+
   app.get("/api/oauth/callback", async (req: Request, res: Response) => {
     const code = getQueryParam(req, "code");
     const state = getQueryParam(req, "state");
